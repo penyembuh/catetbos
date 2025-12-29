@@ -74,7 +74,7 @@
     .toolbar{
       width:100%;
       display:grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-columns: repeat(5, minmax(0, 1fr));
       gap:8px;
       align-items:stretch;
     }
@@ -458,6 +458,8 @@
     .lockSub{font-size:12px;color:var(--muted);margin-top:4px;line-height:1.35}
     .lockBody{padding:10px 8px 6px}
     .lockActions{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+    .lockActions.three{grid-template-columns:1fr 1fr 1fr}
+    @media (max-width:360px){.lockActions.three{grid-template-columns:1fr}}
     @media (max-width:360px){.lockActions{grid-template-columns:1fr}}
   </style>
 </head>
@@ -482,6 +484,7 @@
       <div class="lockActions">
         <button class="btn primary" id="pinSubmitBtn" type="button">Masuk</button>
         <button class="btn ghost" id="pinModeBtn" type="button">Set PIN</button>
+        <button class="btn ghost hidden" id="pinTargetBtn" type="button" title="Pilih PIN yang ingin diatur">PIN: Utama</button>
       </div>
 
       <div class="sp10"></div>
@@ -512,6 +515,8 @@
           <button class="btn ghost" id="seedBtn" title="Isi contoh data">Isi contoh</button>
           <button class="btn ghost" id="resetBtn" title="Hapus semua transaksi">Reset</button>
           <button class="btn" id="exportBtn" title="Backup full: download semua transaksi ke spreadsheet (CSV)">Backup CSV</button>
+          <button class="btn ghost" id="pinSettingsBtn" title="Ganti PIN / set Recovery PIN">PIN</button>
+          <button class="btn ghost" id="logoutBtn" title="Kunci aplikasi">Logout</button>
         </div>
       </header>
 
@@ -2138,6 +2143,27 @@
     $('resetBtn').addEventListener('click', openResetModal);
     $('exportBtn').addEventListener('click', exportCSV);
 
+    // PIN settings (biar tombol Set PIN berguna setelah login)
+    $('pinSettingsBtn').addEventListener('click', () => {
+      if (!__unlocked) {
+        toast('Login dulu');
+        showLock('login');
+        return;
+      }
+      __pinMode = 'set';
+      __pinTarget = 'pin';
+      showLock('set');
+    });
+
+    // Logout = kunci ulang tanpa refresh
+    $('logoutBtn').addEventListener('click', () => {
+      if (!__unlocked) return;
+      __unlocked = false;
+      $('appWrap').classList.add('hidden');
+      toast('Aplikasi dikunci');
+      showLock('login');
+    });
+
     // detail modal
     $('txDetailMask').addEventListener('click', closeTxDetail);
     $('closeTxDetail').addEventListener('click', closeTxDetail);
@@ -2252,19 +2278,21 @@
 
     // ===== PIN Lock wiring =====
     let __pinMode = 'auto'; // 'login' | 'set'
+    let __pinTarget = 'pin'; // 'pin' | 'recovery'
     let __unlocked = false; // session unlock (tidak disimpan permanen)
 
     function showLock(mode){
       __pinMode = mode || 'auto';
       const hasPin = !!loadPinRecord();
 
-      // Jika sudah ada PIN, ubah PIN hanya boleh setelah login (atau master PIN)
+      // Jika sudah ada PIN, ubah PIN hanya boleh setelah login
       let m = (mode === 'set') ? 'set' : (mode === 'login' ? 'login' : (hasPin ? 'login' : 'set'));
       if (hasPin && m === 'set' && !__unlocked) m = 'login';
 
       const pinInput = $('pinInput');
       const pinSubmit = $('pinSubmitBtn');
       const pinModeBtn = $('pinModeBtn');
+      const pinTargetBtn = $('pinTargetBtn');
       const pinHint = $('pinHint');
       const pinSub = $('lockSub');
       const resetAllBtn = $('pinResetAllBtn');
@@ -2273,11 +2301,26 @@
       pinHint.textContent = '';
 
       if (m === 'set') {
-        pinSub.textContent = hasPin ? 'Set PIN baru (mengganti PIN lama). (Butuh login dulu)' : 'Buat PIN baru untuk mengunci catatan.';
-        pinSubmit.textContent = 'Simpan PIN';
+        // Mode set: bisa pilih PIN Utama / Recovery PIN
+        $('lockModal').querySelector('.lockActions')?.classList.add('three');
+        pinTargetBtn.classList.remove('hidden');
+
+        const targetLabel = (__pinTarget === 'recovery') ? 'PIN: Recovery' : 'PIN: Utama';
+        pinTargetBtn.textContent = targetLabel;
+
+        if (__pinTarget === 'recovery') {
+          pinSub.textContent = hasPin ? 'Buat / ganti Recovery PIN (untuk masuk jika lupa PIN utama).' : 'Buat PIN utama dulu sebelum membuat Recovery PIN.';
+          pinSubmit.textContent = 'Simpan Recovery';
+        } else {
+          pinSub.textContent = hasPin ? 'Ganti PIN utama (butuh login dulu).' : 'Buat PIN baru untuk mengunci catatan.';
+          pinSubmit.textContent = 'Simpan PIN';
+        }
+
         pinModeBtn.textContent = 'Mode Login';
         resetAllBtn.classList.add('hidden');
       } else {
+        $('lockModal').querySelector('.lockActions')?.classList.remove('three');
+        pinTargetBtn.classList.add('hidden');
         pinSub.textContent = loadRecoveryRecord() ? 'Masukkan PIN untuk membuka. Jika lupa PIN, kamu bisa pakai Recovery PIN.' : 'Masukkan PIN untuk membuka catatan keuangan.';
         pinSubmit.textContent = 'Masuk';
         pinModeBtn.textContent = 'Set PIN';
@@ -2307,10 +2350,20 @@
 
       try{
         if (desired === 'set') {
-          await setPin(pin);
-          $('pinHint').textContent = 'PIN tersimpan. Silakan login.';
+          if (__pinTarget === 'recovery') {
+            if (!hasPin) throw new Error('Buat PIN utama dulu');
+            await setRecoveryPin(pin);
+            $('pinHint').textContent = 'Recovery PIN tersimpan.';
+          } else {
+            await setPin(pin);
+            $('pinHint').textContent = hasPin ? 'PIN utama diperbarui.' : 'PIN tersimpan. Silakan login.';
+          }
           $('pinHint').style.color = 'rgba(34,197,94,.95)';
-          showLock('login');
+
+          // Kalau set PIN pertama kali: paksa login. Kalau sedang ganti saat sudah unlock: tutup saja.
+          if (!hasPin) { showLock('login'); return; }
+          hideLock();
+          toast(__pinTarget === 'recovery' ? 'Recovery PIN disimpan' : 'PIN disimpan');
           return;
         }
 
@@ -2335,16 +2388,22 @@
     function bindLockUi(){
       $('pinSubmitBtn').addEventListener('click', () => { handlePinSubmit(); });
       $('pinInput').addEventListener('keydown', (e)=>{ if (e.key === 'Enter') handlePinSubmit(); });
+
       $('pinModeBtn').addEventListener('click', () => {
         const hasPin = !!loadPinRecord();
         // kalau sudah ada PIN tapi belum unlock, jangan izinkan langsung set
-        if (hasPin && !__unlocked) {
+        if (hasPin && !__unlocked && __pinMode !== 'login') {
           toast('Login dulu untuk ubah PIN');
           showLock('login');
           return;
         }
         const next = (__pinMode === 'set') ? 'login' : 'set';
         showLock(next);
+      });
+
+      $('pinTargetBtn').addEventListener('click', () => {
+        __pinTarget = (__pinTarget === 'pin') ? 'recovery' : 'pin';
+        showLock('set');
       });
       $('pinResetAllBtn').addEventListener('click', () => {
         const btn = $('pinResetAllBtn');
@@ -2455,3 +2514,4 @@
   </script>
 </body>
 </html>
+
